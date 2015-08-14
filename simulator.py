@@ -25,6 +25,7 @@ class Simulator(object):
         self._cur_time = 0
     
     def run(self):
+        skip_round_num = 1
         while True:
             for process in self._processes:
                 proc_id = process.get_id()
@@ -36,17 +37,22 @@ class Simulator(object):
                 if output:
                     self.sent_output(proc_id, output)
 
-            try:
-                next_round = raw_input('next_round[default:1]: ').strip()
-                if next_round == 'exit':
+            skip_round_num -= 1
+            if skip_round_num <= 0:
+                try:
+                    next_round = raw_input('next_round[default:1]: ').strip()
+                    if next_round == 'exit':
+                        break
+                    elif len(next_round) == 0:
+                        next_round = 1
+                    else:
+                        next_round = int(next_round)
+
+                    skip_round_num = next_round if next_round > 0 else 1
+                except EOFError:
                     break
-                elif len(next_round) == 0:
-                    next_round = 1
-                else:
-                    next_round = int(next_round)
-                self.goto_next_round(next_round)
-            except EOFError:
-                break
+            
+            self.goto_next_round(1)
     
     def get_input(self, proc_id):
         if len(self._input_queues[proc_id]) > 0:
