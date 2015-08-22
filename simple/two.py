@@ -1,17 +1,18 @@
 class ClientProcess(object):
-    def __init__(self, proc_id, server_ids, timeout):
+    def __init__(self, proc_id, server_ids, timeout, set_value=1):
         self._id = proc_id
         self._server_ids = server_ids
         self._server_states = dict((svr_id, True) for svr_id in server_ids)
         self._sent_requests = {}
         self._timeout = timeout
+        self._set_value = set_value
 
     def process(self, _input, time):
         if time == 0:
             for svr_id in self._server_ids:
                 if self._server_states[svr_id]:
                     self._sent_requests[svr_id] = (time, 'set')
-                    return {svr_id: ('set', 1)}
+                    return {svr_id: ('set', self._set_value)}
             assert False
         
         for svr_id, msgs in _input.iteritems():
@@ -19,10 +20,11 @@ class ClientProcess(object):
             assert time - self._sent_requests[svr_id][0] < self._timeout
             if self._sent_requests[svr_id][1] == 'set':
                 assert msgs == ['set success']
+                print 'set success'
                 self._sent_requests[svr_id] = (time, 'get')
                 return {svr_id: ('get',)}
             else:
-                assert msgs == [1]
+                assert msgs == [self._set_value]
                 print 'get result', msgs
                 self._sent_requests = {}
                 # the flow is over here
@@ -39,7 +41,7 @@ class ClientProcess(object):
                     if self._server_states[server_id]:
                         if cmd == 'set':
                             self._sent_requests[server_id] = (time, 'set')
-                            output = {server_id: ('set', 1)}
+                            output = {server_id: ('set', self._set_value)}
                             break
                         else:
                             self._sent_requests[server_id] = (time, 'get')

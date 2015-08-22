@@ -191,6 +191,9 @@ class ServerProcess(object):
     def get_id(self):
         return self._id
 
+    def print_status(self):
+        print '%s(%d, %s)' % (self.__class__.__name__, self._id, str(self._value))
+
 
 processes = [ClientProcess(0, [1, 2, 3], 5),
              ServerProcess(1, [1, 2, 3], 3), ServerProcess(2, [1, 2, 3], 3),

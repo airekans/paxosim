@@ -1,5 +1,6 @@
 import sys
 import importlib
+import inspect
 
 
 class Process(object):
@@ -126,6 +127,14 @@ class Simulator(object):
             return None
 
     @staticmethod
+    def print_process(process):
+        if hasattr(process.__class__, 'print_status') and \
+           inspect.ismethod(process.print_status):
+            process.print_status()
+        else:
+            print '%s(%d)' % (process.__class__.__name__, process.get_id())
+
+    @staticmethod
     def get_process_id_from_command(command):
         args = command.split(' ')
         if len(args) == 1:
@@ -249,12 +258,14 @@ class Simulator(object):
         print 'processes:'
         for p in self._processes:
             if p:
-                print '  %s(%d)' % (p.__class__.__name__, p.get_id())
+                print '  ',
+                Simulator.print_process(p)
 
         print 'stopped_processes:'
         for p in self._stopped_processes:
             if p:
-                print '  %s(%d)' % (p.__class__.__name__, p.get_id())
+                print '  ',
+                Simulator.print_process(p)
 
         print 'links:', self._links
         print 'input_queues:'
