@@ -179,8 +179,16 @@ class ServerProcess(object):
 
     def set_value(self, value, time, output, client_id):
         # propose to set the value
+        if self._seq <= self._promised_seq:
+            member_num = len(self._member_ids) + 1
+            self._seq = ((self._promised_seq - self._seq) / member_num + 1) \
+                * member_num
+
         for proc_id in self._member_ids:
             output[proc_id] = ('propose', self._seq)
+
+        # I will accept the promise myself.
+        self._promised_seq = self._seq
 
         expected_seq = self._seq
         self._seq += len(self._member_ids) + 1
@@ -191,11 +199,19 @@ class ServerProcess(object):
         failure_count = 0
         majority_num = (len(self._member_ids) + 1) / 2 + 1
 
+        is_check_myself = False
         set_value = value
         cur_time = time
         while success_count < majority_num:
             src_id, msg, output = yield
             cur_time += 1
+
+            # check whether I have changed my mind to accept other guy's proposal
+            if not is_check_myself and self._promised_seq != expected_seq:
+                success_count -= 1
+                failure_count += 1
+                is_check_myself = True
+
             if src_id is None:
                 if cur_time > time + self._timeout:
                     failure_count += msg_records.values().count(None)
@@ -216,9 +232,11 @@ class ServerProcess(object):
                     output[client_id] = 'set failed'
                     return
 
-        # the majority has promised to accept the value, so accept it
-        self._value = set_value
-        self._promised_seq = expected_seq
+        # the majority has promised to accept the value
+        # but I have to check whether I should accept it too
+        if self._promised_seq == expected_seq:
+            self._value = set_value
+
         for proc_id in self._member_ids:
             output[proc_id] = ('accept', expected_seq, set_value)
 
