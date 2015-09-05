@@ -5,6 +5,7 @@ In this case, the consensus for this paxos instance is not finished,
 because no majority of the agents have accepted it.
 And in this cases, the agents in the other partitions can also reach
 consensus because the majority of the agents still there.
+To see what will happen if one more agent is partitioned, check partition2.
 """
 
 from paxos.basic import ClientProcess, ServerProcess
