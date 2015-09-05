@@ -117,6 +117,8 @@ class Simulator(object):
                     target, source = Simulator.get_msg_target_source_from_command(command)
                     if target >= 0:
                         self.remove_msg(target, source)
+                elif command == 'read':  # change to read from stdin
+                    self._commands = None
                 elif command == 'status':
                     self.print_status()
                 elif command == 'history':
