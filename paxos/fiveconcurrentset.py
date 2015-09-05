@@ -1,9 +1,9 @@
 """ This case shows that concurrent set in paxos will not result in inconsistency.
-In this case, client 1 will propose successfully, but after that client 2 will
-propose successfully also, with a higher sequence number.
-At this moment, client 1 will find this and abort the current paxos instance,
-then retry another new instance, whose propose message arrives before client 2's
-accept message.
+In this case, client 1 will propose successfully, then it sends accept messages.
+At the same moment, client 2 will start another paxos instance, and
+in the promise messages it gets, it will replace the accepted value with the value
+client ask to set.
+So client 2 will also ask the acceptors to accept the value client 1 sets.
 So after this, client 2 will set failed and client 1 will succeed.
 """
 
