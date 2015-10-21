@@ -63,7 +63,7 @@ class ServerProcess(object):
             self._current_term = cur_term
             self._leader = leader
             self._last_leader_time = 0
-            self._election_timeout = random.randrange(20, 30)
+            self._election_timeout = random.randrange(10, 30)
             self._member_ids = member_ids
 
         def get_status(self):
@@ -79,20 +79,20 @@ class ServerProcess(object):
             output = {}
             for src_id, msgs in _input.iteritems():
                 msg = msgs[0]
-                recv_term, msg_type = msg[0], msg[1]
+                msg_type, recv_term = msg[0], msg[1]
                 if msg_type == 'request_vote':
                     if recv_term < self._current_term:
-                        output[src_id] = (self._current_term, 'reject_vote', self._leader)
+                        output[src_id] = ('reject_vote', self._current_term, self._leader)
                     elif self._leader is None or recv_term > self._current_term:
                         self._leader = src_id
                         self._current_term = recv_term
                         self._last_leader_time = time
-                        output[src_id] = (self._current_term, 'accept_vote')
+                        output[src_id] = ('accept_vote', self._current_term)
                     else:
-                        output[src_id] = (self._current_term, 'reject_vote', self._leader)
+                        output[src_id] = ('reject_vote', self._current_term, self._leader)
                 elif msg_type == 'append_entries':
                     if recv_term < self._current_term:
-                        output[src_id] = (self._current_term, 'no_append')
+                        output[src_id] = ('no_append', self._current_term)
                     elif self._leader is None:
                         print 'recv append_entries from', src_id, 'without leader'
                         # TODO
@@ -116,14 +116,14 @@ class ServerProcess(object):
 
         def process_append_entries(self, msgs):
             # process append_entries
-            return self._current_term, 'append_success'
+            return 'append_success', self._current_term
 
     class Candidate(object):
         def __init__(self, logs, cur_term, member_ids):
             self._logs = logs
             self._cur_term = cur_term
             self._member_ids = member_ids
-            self._election_timeout = random.randrange(20, 30)
+            self._election_timeout = random.randrange(10, 30)
             self._vote_routine = None
 
         def get_status(self):
@@ -138,8 +138,9 @@ class ServerProcess(object):
                 return self._vote_routine.send((_input, time))
 
         # this is a generator
-        def request_vote(self, _input, time):
-            reqs = dict((target, (self._cur_term, 'request_vote'))
+        def request_vote(self, _, time):
+            election_start_time = time
+            reqs = dict((target, ('request_vote', self._cur_term))
                         for target in self._member_ids)
             accept_count = 1
             majority_num = (len(self._member_ids) + 1) / 2 + 1
@@ -147,27 +148,38 @@ class ServerProcess(object):
             while True:
                 output = {}
                 for src_id, msgs in _input.iteritems():
-                    msg = [0]
-                    term = msg[0]
+                    msg = msgs[0]
+                    msg_type, term = msg[0], msg[1]
                     if term == self._cur_term:
-                        msg_type = msg[1]
                         if msg_type == 'accept_vote':
                             accept_count += 1
                             if accept_count >= majority_num:
-                                leader = ServerProcess.Leader(self._logs, self._cur_term)
+                                leader = ServerProcess.Leader(
+                                    self._logs, self._cur_term, self._member_ids)
                                 yield leader.process(_input, time)
                         elif msg_type == 'reject_vote':
-                            print 'recv reject_vote from %d and vote %d as leader' % (
-                                src_id, msg[2]
+                            print 'recv reject_vote from %d and vote %s as leader' % (
+                                src_id, str(msg[2])
                             )
+                        elif msg_type == 'request_vote':
+                            print 'recv request_vote from', src_id, ', reject it'
+                            output[src_id] = ('reject_vote', self._cur_term, None)
                         else:
                             print 'recv unexpected msg', src_id, msgs
                     elif term > self._cur_term:
                         follower = ServerProcess.Follower(
                             self._logs, term, None, self._member_ids)
                         yield follower.process(_input, time)
+                    else:
+                        print 'recv lower term %d from %d' % (term, src_id)
 
-                _input, time = yield (self, output)
+                if election_start_time + self._election_timeout < time:
+                    new_candidate = ServerProcess.Candidate(
+                        self._logs, self._cur_term + 1, self._member_ids)
+                    yield new_candidate.process(_input, time)
+                else:
+                    _input, time = yield (self, output)
+
             return
 
     class Leader(object):
@@ -198,10 +210,10 @@ class ServerProcess(object):
         return output
 
     def print_status(self):
-        print 'RaftServer(%s)' % self._role.get_status()
+        print 'RaftServer(id=%d,%s)' % (self._id, self._role.get_status())
 
 
 processes = [ServerProcess(i, range(5), 3) for i in xrange(5)]
-links = dict(((i, j), 10) for i in xrange(5) for j in xrange(i + 1, 5))
+links = dict(((i, j), 5) for i in xrange(5) for j in xrange(i + 1, 5))
 #commands = ['next 7', 'status', 'next 5']
 
