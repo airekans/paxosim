@@ -164,6 +164,11 @@ class ServerProcess(object):
                         elif msg_type == 'request_vote':
                             print 'recv request_vote from', src_id, ', reject it'
                             output[src_id] = ('reject_vote', self._cur_term, None)
+                        elif msg_type == 'append_entries':
+                            print 'new leader', src_id, 'append_entries'
+                            follower = ServerProcess.Follower(
+                                self._logs, term, src_id, self._member_ids)
+                            yield follower.process(_input, time)
                         else:
                             print 'recv unexpected msg', src_id, msgs
                     elif term > self._cur_term:
@@ -187,12 +192,44 @@ class ServerProcess(object):
             self._logs = logs
             self._cur_term = cur_term
             self._member_ids = member_ids
+            self._lead_routine = None
 
         def get_status(self):
             return 'Leader(t=%d)' % self._cur_term
 
         def process(self, _input, time):
-            return self, {}
+            if self._lead_routine is None:
+                self._lead_routine = self.lead(_input, time)
+                return self._lead_routine.next()
+            else:
+                return self._lead_routine.send((_input, time))
+
+        def lead(self, _input, time):
+            # TODO: handle input
+            reqs = dict((target, ('append_entries', self._cur_term, ''))
+                        for target in self._member_ids)
+            _input, time = yield self, reqs
+            while True:
+                output = {}
+                for src_id, msgs in _input.iteritems():
+                    msg = msgs[0]
+                    msg_type, term = msg[0], msg[1]
+                    if term > self._cur_term:
+                        print 'leader recv higher term %d' % term
+                        if msg_type == 'request_vote':
+                            follower = ServerProcess.Follower(
+                                self._logs, self._cur_term, None, self._member_ids)
+                        elif msg_type == 'append_entries':
+                            follower = ServerProcess.Follower(
+                                self._logs, term, src_id, self._member_ids)
+                        else:
+                            follower = ServerProcess.Follower(
+                                self._logs, term, None, self._member_ids)
+                        yield follower.process(_input, time)
+
+                _input, time = yield (self, output)
+
+            return
 
     def __init__(self, _id, member_ids, timeout):
         self._id = _id
@@ -215,5 +252,6 @@ class ServerProcess(object):
 
 processes = [ServerProcess(i, range(5), 3) for i in xrange(5)]
 links = dict(((i, j), 5) for i in xrange(5) for j in xrange(i + 1, 5))
-#commands = ['next 7', 'status', 'next 5']
+#commands = ['next 20', 'status', 'next 10', 'status', 'next 10',
+ #           'status', 'next 20', 'status']
 
