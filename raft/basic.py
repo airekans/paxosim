@@ -57,13 +57,16 @@ class ServerProcess(object):
     ST_CANDIDATE = 2
     ST_LEADER = 3
 
+    MIN_ELECTION_TIMEOUT = 10
+
     class Follower(object):
         def __init__(self, logs, cur_term, leader, member_ids):
             self._logs = logs
             self._current_term = cur_term
             self._leader = leader
             self._last_leader_time = 0
-            self._election_timeout = random.randrange(10, 30)
+            self._election_timeout = random.randrange(
+                ServerProcess.MIN_ELECTION_TIMEOUT, 30)
             self._member_ids = member_ids
 
         def get_status(self):
@@ -93,16 +96,21 @@ class ServerProcess(object):
                 elif msg_type == 'append_entries':
                     if recv_term < self._current_term:
                         output[src_id] = ('no_append', self._current_term)
-                    elif self._leader is None:
-                        print 'recv append_entries from', src_id, 'without leader'
-                        # TODO
-                    elif src_id == self._leader:
-                        self._current_term = recv_term
+                    elif recv_term == self._current_term:
+                        if self._leader is None:
+                            print 'recv append_entries from', src_id, 'without leader'
+                            self._leader = src_id
+                        if src_id == self._leader:
+                            self._last_leader_time = time
+                            output[src_id] = self.process_append_entries(msg)
+                        else:
+                            print 'recv append_entries from non-leader', src_id
+                            output[src_id] = ('no_append', self._current_term)
+                    else:
+                        print 'recv append_entries from higher term leader', src_id, recv_term
+                        self._leader = src_id
                         self._last_leader_time = time
                         output[src_id] = self.process_append_entries(msg)
-                    else:
-                        # TODO
-                        print 'recv append_entries from non-leader', src_id
                 else:
                     print 'unrecognized msg from', src_id, msg
 
@@ -123,7 +131,8 @@ class ServerProcess(object):
             self._logs = logs
             self._cur_term = cur_term
             self._member_ids = member_ids
-            self._election_timeout = random.randrange(10, 30)
+            self._election_timeout = random.randrange(
+                ServerProcess.MIN_ELECTION_TIMEOUT, 30)
             self._vote_routine = None
 
         def get_status(self):
@@ -152,6 +161,7 @@ class ServerProcess(object):
                     msg_type, term = msg[0], msg[1]
                     if term == self._cur_term:
                         if msg_type == 'accept_vote':
+                            # TODO: check duplicate accept
                             accept_count += 1
                             if accept_count >= majority_num:
                                 leader = ServerProcess.Leader(
@@ -172,8 +182,12 @@ class ServerProcess(object):
                         else:
                             print 'recv unexpected msg', src_id, msgs
                     elif term > self._cur_term:
-                        follower = ServerProcess.Follower(
-                            self._logs, term, None, self._member_ids)
+                        if msg_type in ['append_entries', 'request_vote']:
+                            follower = ServerProcess.Follower(
+                                self._logs, term, None, self._member_ids)
+                        else:
+                            follower = ServerProcess.Follower(
+                                self._logs, term, src_id, self._member_ids)
                         yield follower.process(_input, time)
                     else:
                         print 'recv lower term %d from %d' % (term, src_id)
@@ -193,6 +207,8 @@ class ServerProcess(object):
             self._cur_term = cur_term
             self._member_ids = member_ids
             self._lead_routine = None
+            self._append_timeout = ServerProcess.MIN_ELECTION_TIMEOUT - 2
+            self._last_append_time = 0
 
         def get_status(self):
             return 'Leader(t=%d)' % self._cur_term
@@ -206,9 +222,10 @@ class ServerProcess(object):
 
         def lead(self, _input, time):
             # TODO: handle input
-            reqs = dict((target, ('append_entries', self._cur_term, ''))
-                        for target in self._member_ids)
-            _input, time = yield self, reqs
+            output = {}
+            self.heartbeat(output)
+            self._last_append_time = time
+            _input, time = yield self, output
             while True:
                 output = {}
                 for src_id, msgs in _input.iteritems():
@@ -227,9 +244,17 @@ class ServerProcess(object):
                                 self._logs, term, None, self._member_ids)
                         yield follower.process(_input, time)
 
+                if self._last_append_time + self._append_timeout < time:
+                    self.heartbeat(output)
+                    self._last_append_time = time
                 _input, time = yield (self, output)
 
             return
+
+        def heartbeat(self, output):
+            for target in self._member_ids:
+                if target not in output:
+                    output[target] = ('append_entries', self._cur_term, '')
 
     def __init__(self, _id, member_ids, timeout):
         self._id = _id
