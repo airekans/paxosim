@@ -68,6 +68,8 @@ class ServerProcess(object):
             self._election_timeout = random.randrange(
                 ServerProcess.MIN_ELECTION_TIMEOUT, 30)
             self._member_ids = member_ids
+            self._commit_index = -1
+            self._last_apply_index = -1
 
         def get_status(self):
             return 'Follower(t=%d,l=%s,last=%d,e=%d)' % (
@@ -95,7 +97,7 @@ class ServerProcess(object):
                         output[src_id] = ('reject_vote', self._current_term, self._leader)
                 elif msg_type == 'append_entries':
                     if recv_term < self._current_term:
-                        output[src_id] = ('no_append', self._current_term)
+                        output[src_id] = ('append_result', self._current_term)
                     elif recv_term == self._current_term:
                         if self._leader is None:
                             print 'recv append_entries from', src_id, 'without leader'
@@ -134,6 +136,8 @@ class ServerProcess(object):
             self._election_timeout = random.randrange(
                 ServerProcess.MIN_ELECTION_TIMEOUT, 30)
             self._vote_routine = None
+            self._commit_index = -1
+            self._last_apply_index = -1
 
         def get_status(self):
             return 'Candidate(t=%d,e=%d)' % (
@@ -209,9 +213,13 @@ class ServerProcess(object):
             self._lead_routine = None
             self._append_timeout = ServerProcess.MIN_ELECTION_TIMEOUT - 2
             self._last_append_time = 0
+            self._commit_index = -1
+            self._last_apply_index = -1
+            self._kvs = {}  # this is the state
+            self._set_procedure = None
 
         def get_status(self):
-            return 'Leader(t=%d)' % self._cur_term
+            return 'Leader(t=%d,ci=%d)' % (self._cur_term, self._commit_index)
 
         def process(self, _input, time):
             if self._lead_routine is None:
@@ -230,19 +238,42 @@ class ServerProcess(object):
                 output = {}
                 for src_id, msgs in _input.iteritems():
                     msg = msgs[0]
-                    msg_type, term = msg[0], msg[1]
-                    if term > self._cur_term:
-                        print 'leader recv higher term %d' % term
-                        if msg_type == 'request_vote':
-                            follower = ServerProcess.Follower(
-                                self._logs, self._cur_term, None, self._member_ids)
-                        elif msg_type == 'append_entries':
-                            follower = ServerProcess.Follower(
-                                self._logs, term, src_id, self._member_ids)
+                    msg_type = msg[0]
+                    if src_id not in self._member_ids:  # request from client
+                        if msg_type == 'get':
+                            self.process_get(src_id, msg[1], output)
+                        elif msg_type == 'set':
+                            if self._set_procedure is None:
+                                self._set_procedure = self.process_set(
+                                    src_id, msg[1], msg[2], output)
+                                self._set_procedure.next()
+                            else:
+                                print 'set in progress'
                         else:
-                            follower = ServerProcess.Follower(
-                                self._logs, term, None, self._member_ids)
-                        yield follower.process(_input, time)
+                            print 'recv unknown command from client:', msg, src_id
+                    else:
+                        term = msg[1]
+                        if term > self._cur_term:
+                            print 'leader recv higher term %d' % term
+                            if msg_type == 'request_vote':
+                                follower = ServerProcess.Follower(
+                                    self._logs, self._cur_term, None, self._member_ids)
+                            elif msg_type == 'append_entries':
+                                follower = ServerProcess.Follower(
+                                    self._logs, term, src_id, self._member_ids)
+                            else:
+                                follower = ServerProcess.Follower(
+                                    self._logs, term, None, self._member_ids)
+                            yield follower.process(_input, time)
+                        elif term == self._cur_term:
+                            if msg_type == 'append_result':
+                                if self._set_procedure is not None:
+                                    try:
+                                        self._set_procedure.send(({src_id: msgs}, output))
+                                    except StopIteration:
+                                        self._set_procedure = None
+                                else:
+                                    print 'recv append_result without set'
 
                 if self._last_append_time + self._append_timeout < time:
                     self.heartbeat(output)
@@ -255,6 +286,50 @@ class ServerProcess(object):
             for target in self._member_ids:
                 if target not in output:
                     output[target] = ('append_entries', self._cur_term, '')
+
+        def process_get(self, client_id, _key, output):
+            try:
+                output[client_id] = ('get_result', self._kvs[_key])
+            except KeyError:
+                output[client_id] = ('get_result', None)
+
+        def process_set(self, client_id, _key, _value, output):
+            cmd = ('set', _key, _value)
+            to_commit_index = len(self._logs)
+            self._logs.append((self._cur_term, cmd))
+            for target in self._member_ids:
+                output[target] = ('append_entries', self._cur_term, [cmd])
+
+            majority_num = (1 + self._member_ids) / 2 + 1
+            accept_count = set(['self'])
+            reject_count = set()
+            _input, output = yield
+            while True:
+                for src_id, msgs in output.iteritems():
+                    msg = msgs[0]
+                    msg_type = msg[0]
+                    if msg_type == 'append_result':
+                        term, result = msg[1], msg[2]
+                        if result:
+                            accept_count.add(src_id)
+                        else:
+                            print 'recv failed append from', src_id
+                            reject_count.add(src_id)
+
+                        if len(accept_count) >= majority_num:
+                            output[client_id] = ('set_success',)
+                            # the entry has been commited
+                            self._commit_index = to_commit_index
+                            return
+                        elif len(reject_count) >= majority_num:
+                            print 'majority rejected the accept'
+                            # TODO
+                            return
+                    else:
+                        print
+                _input, output = yield
+
+            return
 
     def __init__(self, _id, member_ids, timeout):
         self._id = _id
