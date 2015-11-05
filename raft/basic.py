@@ -5,39 +5,60 @@ import random
 
 
 class ClientProcess(object):
-    def __init__(self, proc_id, commands):
+    def __init__(self, proc_id, commands, cluster_member_ids):
         self._id = proc_id
         self._commands = commands
+        self._seq = 0
         self._expected_recv_msgs = {}
+        self._cluster_member_ids = cluster_member_ids
         self._leader = None
 
     def process(self, _input, time):
+        output = {}
         for src_id, msgs in _input.iteritems():
-            if src_id not in self._expected_recv_msgs:
+            msg = msgs[0]
+            seq = msg[0]
+            msg = msg[1]
+            msg_type = msg[0]
+            if seq not in self._expected_recv_msgs:
                 print 'recv unexpected msg from', src_id, msgs
                 continue
 
-            deadline, expected_msg = self._expected_recv_msgs[src_id]
-            if time <= deadline:
-                print 'recv msg', msgs[0]
-                assert expected_msg == msgs[0], \
-                    'expected: %s actual: %s' % (expected_msg, msgs[0])
-                del self._expected_recv_msgs[src_id]
+            deadline, sent_msg, expected_msg = self._expected_recv_msgs[seq]
+            if msg_type == 'redirect':
+                leader = msg[1]
+                if leader is not None:
+                    self._leader = msg[1]
 
-        for target in self._expected_recv_msgs.keys():
-            deadline, _ = self._expected_recv_msgs[target]
+                if self._leader is not None:
+                    leader = self._leader
+                else:
+                    leader = random.choice(self._cluster_member_ids)
+
+                output[leader] = (seq, sent_msg)
+            elif time <= deadline:
+                print 'recv msg', msg
+                assert expected_msg == msg, \
+                    'expected: %s actual: %s' % (expected_msg, msg)
+                del self._expected_recv_msgs[seq]
+
+        for seq, item in self._expected_recv_msgs.iteritems():
+            deadline = item[0]
             if time > deadline:
-                print 'not recv msg from %d, timeout' % target
-                del self._expected_recv_msgs[target]
+                print 'not recv msg for seq %d, timeout' % seq
+                del self._expected_recv_msgs[seq]
                 assert False, 'timeout'
 
-        output = {}
         if time in self._commands:
             for command in self._commands[time]:
-                target, send_msg, recv_msg, timeout = command
-                assert target not in self._expected_recv_msgs
-                output[target] = send_msg
-                self._expected_recv_msgs[target] = (time + timeout, recv_msg)
+                send_msg, recv_msg, timeout = command
+                if self._leader is None:
+                    target = random.choice(self._cluster_member_ids)
+                else:
+                    target = self._leader
+                output[target] = (self._seq, send_msg)
+                self._expected_recv_msgs[self._seq] = (time + timeout, send_msg, recv_msg)
+                self._seq += 1
 
             del self._commands[time]
 
@@ -47,9 +68,8 @@ class ClientProcess(object):
         return self._id
 
     def print_status(self):
-        print '%s(id=%d,seq=%d,promised_seq=%d,v=%s,cv=%s)' % (
-            self.__class__.__name__, self._id, self._seq, self._promised_seq,
-            self._value, self._commited_value)
+        print '%s(id=%d,seq=%d,l=%s)' % (
+            self.__class__.__name__, self._id, self._seq, str(self._leader))
 
 
 class ServerProcess(object):
@@ -84,6 +104,10 @@ class ServerProcess(object):
             output = {}
             for src_id, msgs in _input.iteritems():
                 msg = msgs[0]
+                if src_id not in self._member_ids:  # client requests
+                    output[src_id] = (msg[0], ('redirect', self._leader))
+                    continue
+
                 msg_type, recv_term = msg[0], msg[1]
                 if msg_type == 'request_vote':
                     if recv_term < self._current_term:
@@ -126,7 +150,7 @@ class ServerProcess(object):
 
         def process_append_entries(self, msgs):
             # process append_entries
-            return 'append_success', self._current_term
+            return 'append_result', self._current_term, True
 
     class Candidate(object):
         def __init__(self, logs, cur_term, member_ids):
@@ -162,6 +186,11 @@ class ServerProcess(object):
                 output = {}
                 for src_id, msgs in _input.iteritems():
                     msg = msgs[0]
+                    if src_id not in self._member_ids:  # client request
+                        seq = msg[0]
+                        output[src_id] = (seq, ('redirect', None))
+                        continue
+
                     msg_type, term = msg[0], msg[1]
                     if term == self._cur_term:
                         if msg_type == 'accept_vote':
@@ -238,20 +267,23 @@ class ServerProcess(object):
                 output = {}
                 for src_id, msgs in _input.iteritems():
                     msg = msgs[0]
-                    msg_type = msg[0]
                     if src_id not in self._member_ids:  # request from client
+                        seq = msg[0]
+                        msg = msg[1]
+                        msg_type = msg[0]
                         if msg_type == 'get':
-                            self.process_get(src_id, msg[1], output)
+                            self.process_get(src_id, seq, msg[1], output)
                         elif msg_type == 'set':
                             if self._set_procedure is None:
                                 self._set_procedure = self.process_set(
-                                    src_id, msg[1], msg[2], output)
+                                    src_id, seq, msg[1], msg[2], output)
                                 self._set_procedure.next()
                             else:
                                 print 'set in progress'
                         else:
                             print 'recv unknown command from client:', msg, src_id
                     else:
+                        msg_type = msg[0]
                         term = msg[1]
                         if term > self._cur_term:
                             print 'leader recv higher term %d' % term
@@ -287,13 +319,13 @@ class ServerProcess(object):
                 if target not in output:
                     output[target] = ('append_entries', self._cur_term, '')
 
-        def process_get(self, client_id, _key, output):
+        def process_get(self, client_id, seq, _key, output):
             try:
-                output[client_id] = ('get_result', self._kvs[_key])
+                output[client_id] = (seq, ('get_result', self._kvs[_key]))
             except KeyError:
-                output[client_id] = ('get_result', None)
+                output[client_id] = (seq, ('get_result', None))
 
-        def process_set(self, client_id, _key, _value, output):
+        def process_set(self, client_id, seq, _key, _value, output):
             cmd = ('set', _key, _value)
             to_commit_index = len(self._logs)
             self._logs.append((self._cur_term, cmd))
@@ -317,7 +349,7 @@ class ServerProcess(object):
                             reject_count.add(src_id)
 
                         if len(accept_count) >= majority_num:
-                            output[client_id] = ('set_success',)
+                            output[client_id] = (seq, ('set_success',))
                             # the entry has been commited
                             self._commit_index = to_commit_index
                             return
@@ -350,8 +382,10 @@ class ServerProcess(object):
         print 'RaftServer(id=%d,%s)' % (self._id, self._role.get_status())
 
 
-processes = [ServerProcess(i, range(5), 3) for i in xrange(5)]
-links = dict(((i, j), 5) for i in xrange(5) for j in xrange(i + 1, 5))
+client_commands = {20: [(('get', 10), ('get_result', None), 20)]}
+processes = [ClientProcess(0, client_commands, range(1, 6))] + \
+            [ServerProcess(i, range(1, 6), 3) for i in xrange(1, 6)]
+links = dict(((i, j), 5) for i in xrange(6) for j in xrange(i + 1, 6))
 #commands = ['next 20', 'status', 'next 10', 'status', 'next 10',
  #           'status', 'next 20', 'status']
 
