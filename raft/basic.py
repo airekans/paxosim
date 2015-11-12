@@ -120,23 +120,24 @@ class ServerProcess(object):
                     else:
                         output[src_id] = ('reject_vote', self._current_term, self._leader)
                 elif msg_type == 'append_entries':
+                    seq = msg[2]
                     if recv_term < self._current_term:
-                        output[src_id] = ('append_result', self._current_term)
+                        output[src_id] = ('append_result', self._current_term, seq, False)
                     elif recv_term == self._current_term:
                         if self._leader is None:
                             print 'recv append_entries from', src_id, 'without leader'
                             self._leader = src_id
                         if src_id == self._leader:
                             self._last_leader_time = time
-                            output[src_id] = self.process_append_entries(msg)
+                            output[src_id] = self.process_append_entries(msg, seq)
                         else:
                             print 'recv append_entries from non-leader', src_id
-                            output[src_id] = ('no_append', self._current_term)
+                            output[src_id] = ('append_result', self._current_term, seq, False)
                     else:
                         print 'recv append_entries from higher term leader', src_id, recv_term
                         self._leader = src_id
                         self._last_leader_time = time
-                        output[src_id] = self.process_append_entries(msg)
+                        output[src_id] = self.process_append_entries(msg, seq)
                 else:
                     print 'unrecognized msg from', src_id, msg
 
@@ -148,9 +149,9 @@ class ServerProcess(object):
 
             return self, output
 
-        def process_append_entries(self, msgs):
+        def process_append_entries(self, msgs, seq):
             # process append_entries
-            return 'append_result', self._current_term, True
+            return 'append_result', self._current_term, seq, True
 
     class Candidate(object):
         def __init__(self, logs, cur_term, member_ids):
@@ -246,6 +247,8 @@ class ServerProcess(object):
             self._last_apply_index = -1
             self._kvs = {}  # this is the state
             self._set_procedure = None
+            self._sent_req_seqs = {}
+            self._req_seq = 0
 
         def get_status(self):
             return 'Leader(t=%d,ci=%d)' % (self._cur_term, self._commit_index)
@@ -299,13 +302,21 @@ class ServerProcess(object):
                             yield follower.process(_input, time)
                         elif term == self._cur_term:
                             if msg_type == 'append_result':
-                                if self._set_procedure is not None:
-                                    try:
-                                        self._set_procedure.send(({src_id: msgs}, output))
-                                    except StopIteration:
-                                        self._set_procedure = None
-                                else:
-                                    print 'recv append_result without set'
+                                seq = msg[2]
+                                try:
+                                    sent_req_type = self._sent_req_seqs[seq]
+                                except KeyError:
+                                    print 'recv unknown seq from', src_id, seq
+                                    continue
+
+                                if sent_req_type == 'set':
+                                    if self._set_procedure is not None:
+                                        try:
+                                            self._set_procedure.send(({src_id: msgs}, output))
+                                        except StopIteration:
+                                            self._set_procedure = None
+                                    else:
+                                        print 'recv append_result without set'
 
                 if self._last_append_time + self._append_timeout < time:
                     self.heartbeat(output)
@@ -317,7 +328,10 @@ class ServerProcess(object):
         def heartbeat(self, output):
             for target in self._member_ids:
                 if target not in output:
-                    output[target] = ('append_entries', self._cur_term, '')
+                    output[target] = ('append_entries', self._cur_term, self._req_seq, [])
+
+            self._sent_req_seqs[self._req_seq] = 'heartbeat'
+            self._req_seq += 1
 
         def process_get(self, client_id, seq, _key, output):
             try:
@@ -330,7 +344,10 @@ class ServerProcess(object):
             to_commit_index = len(self._logs)
             self._logs.append((self._cur_term, cmd))
             for target in self._member_ids:
-                output[target] = ('append_entries', self._cur_term, [cmd])
+                output[target] = ('append_entries', self._cur_term, self._req_seq, [cmd])
+
+            self._sent_req_seqs[self._req_seq] = 'set'
+            self._req_seq += 1
 
             majority_num = (1 + self._member_ids) / 2 + 1
             accept_count = set(['self'])
@@ -341,7 +358,7 @@ class ServerProcess(object):
                     msg = msgs[0]
                     msg_type = msg[0]
                     if msg_type == 'append_result':
-                        term, result = msg[1], msg[2]
+                        term, result = msg[1], msg[3]
                         if result:
                             accept_count.add(src_id)
                         else:
