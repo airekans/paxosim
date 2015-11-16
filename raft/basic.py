@@ -251,7 +251,9 @@ class ServerProcess(object):
             self._req_seq = 0
 
         def get_status(self):
-            return 'Leader(t=%d,ci=%d)' % (self._cur_term, self._commit_index)
+            return 'Leader(t=%d,ci=%d,la=%d,logs=%s,st=%s)' % (
+                self._cur_term, self._commit_index,
+                self._last_apply_index, str(self._logs), str(self._kvs))
 
         def process(self, _input, time):
             if self._lead_routine is None:
@@ -305,6 +307,7 @@ class ServerProcess(object):
                                 seq = msg[2]
                                 try:
                                     sent_req_type = self._sent_req_seqs[seq]
+                                    del self._sent_req_seqs[seq]
                                 except KeyError:
                                     print 'recv unknown seq from', src_id, seq
                                     continue
@@ -329,9 +332,8 @@ class ServerProcess(object):
             for target in self._member_ids:
                 if target not in output:
                     output[target] = ('append_entries', self._cur_term, self._req_seq, [])
-
-            self._sent_req_seqs[self._req_seq] = 'heartbeat'
-            self._req_seq += 1
+                    self._sent_req_seqs[self._req_seq] = 'heartbeat'
+                    self._req_seq += 1
 
         def process_get(self, client_id, seq, _key, output):
             try:
@@ -345,16 +347,15 @@ class ServerProcess(object):
             self._logs.append((self._cur_term, cmd))
             for target in self._member_ids:
                 output[target] = ('append_entries', self._cur_term, self._req_seq, [cmd])
+                self._sent_req_seqs[self._req_seq] = 'set'
+                self._req_seq += 1
 
-            self._sent_req_seqs[self._req_seq] = 'set'
-            self._req_seq += 1
-
-            majority_num = (1 + self._member_ids) / 2 + 1
+            majority_num = (1 + len(self._member_ids)) / 2 + 1
             accept_count = set(['self'])
             reject_count = set()
             _input, output = yield
             while True:
-                for src_id, msgs in output.iteritems():
+                for src_id, msgs in _input.iteritems():
                     msg = msgs[0]
                     msg_type = msg[0]
                     if msg_type == 'append_result':
@@ -366,9 +367,9 @@ class ServerProcess(object):
                             reject_count.add(src_id)
 
                         if len(accept_count) >= majority_num:
-                            output[client_id] = (seq, ('set_success',))
-                            # the entry has been commited
-                            self._commit_index = to_commit_index
+                            output[client_id] = (seq, ('set_result', True))
+                            # the entry has been commited, apply it to the state machine
+                            self.commit_log(to_commit_index)
                             return
                         elif len(reject_count) >= majority_num:
                             print 'majority rejected the accept'
@@ -379,6 +380,16 @@ class ServerProcess(object):
                 _input, output = yield
 
             return
+
+        def commit_log(self, commit_index):
+            self._commit_index = commit_index
+            if commit_index > self._last_apply_index:
+                for i in xrange(self._last_apply_index + 1, commit_index + 1):
+                    term, log_msg = self._logs[i]
+                    assert log_msg[0] == 'set', str(log_msg)
+                    self._kvs[log_msg[1]] = log_msg[2]
+
+                self._last_apply_index = commit_index
 
     def __init__(self, _id, member_ids, timeout):
         self._id = _id
@@ -399,7 +410,7 @@ class ServerProcess(object):
         print 'RaftServer(id=%d,%s)' % (self._id, self._role.get_status())
 
 
-client_commands = {20: [(('get', 10), ('get_result', None), 20)]}
+client_commands = {30: [(('set', 1, 2), ('set_result', True), 40)]}
 processes = [ClientProcess(0, client_commands, range(1, 6))] + \
             [ServerProcess(i, range(1, 6), 3) for i in xrange(1, 6)]
 links = dict(((i, j), 5) for i in xrange(6) for j in xrange(i + 1, 6))
