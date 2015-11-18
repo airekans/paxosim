@@ -92,9 +92,9 @@ class ServerProcess(object):
             self._last_apply_index = -1
 
         def get_status(self):
-            return 'Follower(t=%d,l=%s,last=%d,e=%d)' % (
+            return 'Follower(t=%d,l=%s,last=%d,e=%d,logs=%s)' % (
                 self._current_term, str(self._leader), self._last_leader_time,
-                self._election_timeout
+                self._election_timeout, str(self._logs)
             )
 
         def process(self, _input, time):
@@ -149,8 +149,21 @@ class ServerProcess(object):
 
             return self, output
 
-        def process_append_entries(self, msgs, seq):
-            # process append_entries
+        def process_append_entries(self, msg, seq):
+            logs, prev_index, prev_term, last_commit_index = msg[3:]
+            if prev_index >= 0:
+                if prev_index < len(self._logs) and self._logs[prev_index][0] != prev_term:
+                    return 'append_result', self._current_term, seq, False
+
+            for i, cmd in enumerate(logs):
+                if prev_index + 1 + i >= len(self._logs):
+                    break
+
+                if self._logs[prev_index + 1 + i][0] != cmd[0]:
+                    self._logs = self._logs[:prev_index + 1 + i]
+                    break
+
+            self._logs.extend(logs[len(self._logs) - prev_index - 1:])
             return 'append_result', self._current_term, seq, True
 
     class Candidate(object):
@@ -165,8 +178,8 @@ class ServerProcess(object):
             self._last_apply_index = -1
 
         def get_status(self):
-            return 'Candidate(t=%d,e=%d)' % (
-                self._cur_term, self._election_timeout)
+            return 'Candidate(t=%d,e=%d,logs=%s)' % (
+                self._cur_term, self._election_timeout, str(self._logs))
 
         def process(self, _input, time):
             if self._vote_routine is None:
@@ -225,6 +238,8 @@ class ServerProcess(object):
                         yield follower.process(_input, time)
                     else:
                         print 'recv lower term %d from %d' % (term, src_id)
+                        if msg_type == 'append_entries':
+                            output[src_id] = ('append_result', self._cur_term, msg[2], False)
 
                 if election_start_time + self._election_timeout < time:
                     new_candidate = ServerProcess.Candidate(
@@ -329,9 +344,12 @@ class ServerProcess(object):
             return
 
         def heartbeat(self, output):
+            prev_index = len(self._logs) - 1
+            prev_term = self._logs[-1][0] if len(self._logs) > 0 else 0
             for target in self._member_ids:
                 if target not in output:
-                    output[target] = ('append_entries', self._cur_term, self._req_seq, [])
+                    output[target] = ('append_entries', self._cur_term, self._req_seq, [],
+                        prev_index, prev_term, self._commit_index)
                     self._sent_req_seqs[self._req_seq] = 'heartbeat'
                     self._req_seq += 1
 
@@ -344,9 +362,11 @@ class ServerProcess(object):
         def process_set(self, client_id, seq, _key, _value, output):
             cmd = ('set', _key, _value)
             to_commit_index = len(self._logs)
+            prev_term = self._logs[-1][0] if len(self._logs) > 0 else 0
             self._logs.append((self._cur_term, cmd))
             for target in self._member_ids:
-                output[target] = ('append_entries', self._cur_term, self._req_seq, [cmd])
+                output[target] = ('append_entries', self._cur_term, self._req_seq, [cmd],
+                    to_commit_index - 1, prev_term, self._commit_index)
                 self._sent_req_seqs[self._req_seq] = 'set'
                 self._req_seq += 1
 
@@ -410,7 +430,8 @@ class ServerProcess(object):
         print 'RaftServer(id=%d,%s)' % (self._id, self._role.get_status())
 
 
-client_commands = {30: [(('set', 1, 2), ('set_result', True), 40)]}
+client_commands = {30: [(('set', 1, 2), ('set_result', True), 40)],
+                   100: [(('get', 1), ('get_result', 2), 40)]}
 processes = [ClientProcess(0, client_commands, range(1, 6))] + \
             [ServerProcess(i, range(1, 6), 3) for i in xrange(1, 6)]
 links = dict(((i, j), 5) for i in xrange(6) for j in xrange(i + 1, 6))
