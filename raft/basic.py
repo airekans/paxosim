@@ -108,9 +108,11 @@ class ServerProcess(object):
 
                 msg_type, recv_term = msg[0], msg[1]
                 if msg_type == 'request_vote':
+                    last_index, last_term = msg[2], msg[3]
                     if recv_term < self._current_term:
                         output[src_id] = ('reject_vote', self._current_term, self._leader)
-                    elif self._leader is None or recv_term > self._current_term:
+                    elif ((self._leader is None or self._leader == src_id) and
+                            self.is_candidate_log_up_to_date(last_index, last_term)):
                         self._leader = src_id
                         self._current_term = recv_term
                         self._last_leader_time = time
@@ -146,6 +148,19 @@ class ServerProcess(object):
                 return candidate.process(_input, time)
 
             return self, output
+
+        def is_candidate_log_up_to_date(self, last_index, last_term):
+            if len(self._logs) == 0:
+                return True
+
+            my_last_index = len(self._logs) - 1
+            my_last_term = self._logs[-1][0]
+            if my_last_term < last_term:
+                return True
+            elif my_last_term > last_term:
+                return False
+            else:  # my_last_term == last_term
+                return my_last_index <= last_index
 
         def process_append_entries(self, msg, seq):
             logs, prev_index, prev_term, last_commit_index = msg[3:]
@@ -205,8 +220,9 @@ class ServerProcess(object):
         # this is a generator
         def request_vote(self, _, time):
             election_start_time = time
-            reqs = dict((target, ('request_vote', self._cur_term))
-                        for target in self._member_ids)
+            req_msg = ('request_vote', self._cur_term, len(self._logs) - 1,
+                        self._logs[-1][0] if len(self._logs) > 0 else -1)
+            reqs = dict((target, req_msg) for target in self._member_ids)
             accept_count = 1
             majority_num = (len(self._member_ids) + 1) / 2 + 1
             _input, time = yield (self, reqs)
