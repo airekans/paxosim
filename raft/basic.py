@@ -394,7 +394,7 @@ class ServerProcess(object):
                         msg_type = msg[0]
                         term = msg[1]
                         if term > self._cur_term:
-                            print self._id, 'leader recv higher term %d' % term
+                            print self._id, 'leader recv higher term', term, msg
                             if msg_type == 'request_vote':
                                 follower = ServerProcess.Follower(
                                     self._id, self._random_num, self._logs, self._cur_term,
