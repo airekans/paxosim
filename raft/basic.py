@@ -205,6 +205,11 @@ class ServerProcess(object):
                     print self._id, 'not consistent logs with leader', self._leader, msg
                     return 'append_result', self._current_term, seq, False
 
+                # this follower's logs does not contain the leader's log
+                if prev_index >= len(self._logs):
+                    print self._id, 'fewer logs with leader', self._leader, msg, len(self._logs)
+                    return 'append_result', self._current_term, seq, False
+
             for i, cmd in enumerate(logs):
                 if prev_index + 1 + i >= len(self._logs):
                     break
@@ -424,6 +429,11 @@ class ServerProcess(object):
                                             self._set_procedure = None
                                     else:
                                         print self._id, 'recv append_result without set'
+                                else:  # heartbeat response
+                                    append_result = msg[3]
+                                    if not append_result:
+                                        self._next_index[src_id] -= 1
+                                        self.send_append_entries(output, src_id, 'heartbeat')
 
                 if self._last_append_time + self._append_timeout < time:
                     self.heartbeat(output)
@@ -433,14 +443,9 @@ class ServerProcess(object):
             return
 
         def heartbeat(self, output):
-            prev_index = len(self._logs) - 1
-            prev_term = self._logs[-1][0] if len(self._logs) > 0 else 0
             for target in self._member_ids:
                 if target not in output:
-                    output[target] = ('append_entries', self._cur_term, self._req_seq, [],
-                        prev_index, prev_term, self._commit_index)
-                    self._sent_req_seqs[self._req_seq] = 'heartbeat'
-                    self._req_seq += 1
+                    self.send_append_entries(output, target, 'heartbeat')
 
         def process_get(self, client_id, seq, _key, output):
             try:
@@ -454,7 +459,7 @@ class ServerProcess(object):
             self._logs.append((self._cur_term, cmd))
 
             for target in self._member_ids:
-                self.send_append_entries(output, target)
+                self.send_append_entries(output, target, 'set')
 
             majority_num = (1 + len(self._member_ids)) / 2 + 1
             accept_count = set(['self'])
@@ -474,7 +479,7 @@ class ServerProcess(object):
                             print self._id, 'recv failed append from', src_id, '. retry.'
                             assert self._next_index[src_id] >= 0
                             self._next_index[src_id] -= 1
-                            self.send_append_entries(output, src_id)
+                            self.send_append_entries(output, src_id, 'set')
 
                         if len(accept_count) >= majority_num:
                             output[client_id] = (seq, ('set_result', True))
@@ -491,13 +496,13 @@ class ServerProcess(object):
 
             return
 
-        def send_append_entries(self, output, target):
+        def send_append_entries(self, output, target, purpose):
             its_next_index = self._next_index[target]
             prev_term = self._logs[its_next_index - 1][0] if its_next_index > 0 else 0
             cmds = self._logs[its_next_index:]
             output[target] = ('append_entries', self._cur_term, self._req_seq,
                               cmds, its_next_index - 1, prev_term, self._commit_index)
-            self._sent_req_seqs[self._req_seq] = 'set'
+            self._sent_req_seqs[self._req_seq] = purpose
             self._req_seq += 1
 
         def update_commit_index(self, new_commit_index):
@@ -545,10 +550,10 @@ class ServerProcess(object):
         print 'RaftServer(id=%d,%s)' % (self._id, self._role.get_status())
 
 
-client_commands = {30: [(('set', 1, 2), ('set_result', True), 40)],
-                   80: [(('set', 2, 3), ('set_result', True), 40)],
-                   180: [(('set', 3, 4), ('set_result', True), 40)],
-                   220: [(('get', 2), ('get_result', 3), 40)]}
+client_commands = {30: [(('set', 1, 2), ('set_result', True), 60)],
+                   80: [(('set', 2, 3), ('set_result', True), 60)],
+                   180: [(('set', 3, 4), ('set_result', True), 60)],
+                   220: [(('get', 2), ('get_result', 3), 60)]}
 processes = [ClientProcess(0, client_commands, range(1, 6))] + \
             [ServerProcess(i, range(1, 6), 3) for i in xrange(1, 6)]
 links = dict(((i, j), 5) for i in xrange(6) for j in xrange(i + 1, 6))
