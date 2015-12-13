@@ -21,7 +21,7 @@ class ClientProcess(object):
             msg = msg[1]
             msg_type = msg[0]
             if seq not in self._expected_recv_msgs:
-                print 'recv unexpected msg from', src_id, msgs
+                print self._id, 'recv unexpected msg from', src_id, msgs
                 continue
 
             deadline, sent_msg, expected_msg = self._expected_recv_msgs[seq]
@@ -37,7 +37,7 @@ class ClientProcess(object):
 
                 output[leader] = (seq, sent_msg)
             elif time <= deadline:
-                print 'recv msg', msg
+                print self._id, 'recv msg', msg
                 assert expected_msg == msg, \
                     'expected: %s actual: %s' % (expected_msg, msg)
                 del self._expected_recv_msgs[seq]
@@ -45,7 +45,7 @@ class ClientProcess(object):
         for seq, item in self._expected_recv_msgs.iteritems():
             deadline = item[0]
             if time > deadline:
-                print 'not recv msg for seq %d, timeout' % seq
+                print self._id, 'not recv msg for seq %d, timeout' % seq
                 del self._expected_recv_msgs[seq]
                 assert False, 'timeout'
 
@@ -76,8 +76,9 @@ class ServerProcess(object):
     MIN_ELECTION_TIMEOUT = 10
 
     class Follower(object):
-        def __init__(self, logs, cur_term, leader, member_ids, kvs,
+        def __init__(self, _id, logs, cur_term, leader, member_ids, kvs,
                      commit_index, last_apply_index):
+            self._id = _id
             self._logs = logs
             self._current_term = cur_term
             self._leader = leader
@@ -112,40 +113,47 @@ class ServerProcess(object):
                     last_index, last_term = msg[2], msg[3]
                     if recv_term < self._current_term:
                         output[src_id] = ('reject_vote', self._current_term, self._leader)
-                    elif ((self._leader is None or self._leader == src_id) and
-                            self.is_candidate_log_up_to_date(last_index, last_term)):
-                        self._leader = src_id
-                        self._current_term = recv_term
-                        self._last_leader_time = time
-                        output[src_id] = ('accept_vote', self._current_term)
                     else:
-                        output[src_id] = ('reject_vote', self._current_term, self._leader)
+                        if recv_term > self._current_term:
+                            print self._id, 'recv higher term from', src_id, ', reset leader'
+                            self._current_term = recv_term
+                            self._leader = None
+
+                        if ((self._leader is None or self._leader == src_id) and
+                                self.is_candidate_log_up_to_date(last_index, last_term)):
+                            self._leader = src_id
+                            self._current_term = recv_term
+                            self._last_leader_time = time
+                            output[src_id] = ('accept_vote', self._current_term)
+                        else:
+                            output[src_id] = ('reject_vote', self._current_term, self._leader)
                 elif msg_type == 'append_entries':
                     seq = msg[2]
                     if recv_term < self._current_term:
                         output[src_id] = ('append_result', self._current_term, seq, False)
                     elif recv_term == self._current_term:
                         if self._leader is None:
-                            print 'recv append_entries from', src_id, 'without leader'
+                            print self._id, 'recv append_entries from', src_id, 'without leader'
                             self._leader = src_id
                         if src_id == self._leader:
                             self._last_leader_time = time
                             output[src_id] = self.process_append_entries(msg, seq)
                         else:
-                            print 'recv append_entries from non-leader', src_id
+                            print self._id, 'recv append_entries from non-leader', src_id
                             output[src_id] = ('append_result', self._current_term, seq, False)
                     else:
-                        print 'recv append_entries from higher term leader', src_id, recv_term
+                        print self._id, 'recv append_entries from higher term leader', \
+                            src_id, recv_term
                         self._leader = src_id
                         self._last_leader_time = time
                         output[src_id] = self.process_append_entries(msg, seq)
                 else:
-                    print 'unrecognized msg from', src_id, msg
+                    print self._id, 'unrecognized msg from', src_id, msg
 
             if self._last_leader_time + self._election_timeout < time:
                 self._leader = None
                 candidate = ServerProcess.Candidate(
-                    self._logs, self._current_term + 1, self._member_ids, self._kvs,
+                    self._id, self._logs, self._current_term + 1, self._member_ids, self._kvs,
                     self._commit_index, self._last_apply_index)
                 return candidate.process(_input, time)
 
@@ -168,7 +176,7 @@ class ServerProcess(object):
             logs, prev_index, prev_term, last_commit_index = msg[3:]
             if prev_index >= 0:
                 if prev_index < len(self._logs) and self._logs[prev_index][0] != prev_term:
-                    print 'not consistent logs with leader', self._leader, msg
+                    print self._id, 'not consistent logs with leader', self._leader, msg
                     return 'append_result', self._current_term, seq, False
 
             for i, cmd in enumerate(logs):
@@ -188,7 +196,7 @@ class ServerProcess(object):
             if self._last_apply_index < last_commit_index:
                 for i in xrange(self._last_apply_index + 1, last_commit_index + 1):
                     _, cmd = self._logs[i]
-                    print 'apply cmd to follower:', cmd
+                    print self._id, 'apply cmd to follower:', cmd
                     if cmd[0] == 'set':
                         self._kvs[cmd[1]] = cmd[2]
 
@@ -197,7 +205,9 @@ class ServerProcess(object):
             return 'append_result', self._current_term, seq, True
 
     class Candidate(object):
-        def __init__(self, logs, cur_term, member_ids, kvs, commit_index, last_apply_index):
+        def __init__(self, _id, logs, cur_term, member_ids, kvs,
+                     commit_index, last_apply_index):
+            self._id = _id
             self._logs = logs
             self._cur_term = cur_term
             self._member_ids = member_ids
@@ -244,42 +254,42 @@ class ServerProcess(object):
                             accept_count += 1
                             if accept_count >= majority_num:
                                 leader = ServerProcess.Leader(
-                                    self._logs, self._cur_term, self._member_ids, self._kvs,
-                                    self._commit_index, self._last_apply_index)
+                                    self._id, self._logs, self._cur_term, self._member_ids,
+                                    self._kvs, self._commit_index, self._last_apply_index)
                                 yield leader.process(_input, time)
                         elif msg_type == 'reject_vote':
-                            print 'recv reject_vote from %d and vote %s as leader' % (
+                            print self._id, 'recv reject_vote from %d and vote %s as leader' % (
                                 src_id, str(msg[2])
                             )
                         elif msg_type == 'request_vote':
-                            print 'recv request_vote from', src_id, ', reject it'
+                            print self._id, 'recv request_vote from', src_id, ', reject it'
                             output[src_id] = ('reject_vote', self._cur_term, None)
                         elif msg_type == 'append_entries':
-                            print 'new leader', src_id, 'append_entries'
+                            print self._id, 'new leader', src_id, 'append_entries'
                             follower = ServerProcess.Follower(
-                                self._logs, term, src_id, self._member_ids, self._kvs,
+                                self._id, self._logs, term, src_id, self._member_ids, self._kvs,
                                 self._commit_index, self._last_apply_index)
                             yield follower.process(_input, time)
                         else:
-                            print 'recv unexpected msg', src_id, msgs
+                            print self._id, 'recv unexpected msg', src_id, msgs
                     elif term > self._cur_term:
                         if msg_type in ['append_entries', 'request_vote']:
                             follower = ServerProcess.Follower(
-                                self._logs, term, None, self._member_ids, self._kvs,
+                                self._id, self._logs, term, None, self._member_ids, self._kvs,
                                 self._commit_index, self._last_apply_index)
                         else:
                             follower = ServerProcess.Follower(
-                                self._logs, term, src_id, self._member_ids, self._kvs,
+                                self._id, self._logs, term, src_id, self._member_ids, self._kvs,
                                 self._commit_index, self._last_apply_index)
                         yield follower.process(_input, time)
                     else:
-                        print 'recv lower term %d from %d' % (term, src_id)
+                        print self._id, 'recv lower term %d from %d' % (term, src_id)
                         if msg_type == 'append_entries':
                             output[src_id] = ('append_result', self._cur_term, msg[2], False)
 
                 if election_start_time + self._election_timeout < time:
                     new_candidate = ServerProcess.Candidate(
-                        self._logs, self._cur_term + 1, self._member_ids, self._kvs,
+                        self._id, self._logs, self._cur_term + 1, self._member_ids, self._kvs,
                         self._commit_index, self._last_apply_index)
                     yield new_candidate.process(_input, time)
                 else:
@@ -288,7 +298,9 @@ class ServerProcess(object):
             return
 
     class Leader(object):
-        def __init__(self, logs, cur_term, member_ids, kvs, commit_index, last_apply_index):
+        def __init__(self, _id, logs, cur_term, member_ids, kvs,
+                     commit_index, last_apply_index):
+            self._id = _id
             self._logs = logs
             self._cur_term = cur_term
             self._member_ids = member_ids
@@ -338,25 +350,25 @@ class ServerProcess(object):
                                     src_id, seq, msg[1], msg[2], output)
                                 self._set_procedure.next()
                             else:
-                                print 'set in progress'
+                                print self._id, 'set in progress'
                         else:
-                            print 'recv unknown command from client:', msg, src_id
+                            print self._id, 'recv unknown command from client:', msg, src_id
                     else:
                         msg_type = msg[0]
                         term = msg[1]
                         if term > self._cur_term:
-                            print 'leader recv higher term %d' % term
+                            print self._id, 'leader recv higher term %d' % term
                             if msg_type == 'request_vote':
                                 follower = ServerProcess.Follower(
-                                    self._logs, self._cur_term, None, self._member_ids,
+                                    self._id, self._logs, self._cur_term, None, self._member_ids,
                                     self._kvs, self._commit_index, self._last_apply_index)
                             elif msg_type == 'append_entries':
                                 follower = ServerProcess.Follower(
-                                    self._logs, term, src_id, self._member_ids, self._kvs,
+                                    self._id, self._logs, term, src_id, self._member_ids, self._kvs,
                                     self._commit_index, self._last_apply_index)
                             else:
                                 follower = ServerProcess.Follower(
-                                    self._logs, term, None, self._member_ids, self._kvs,
+                                    self._id, self._logs, term, None, self._member_ids, self._kvs,
                                     self._commit_index, self._last_apply_index)
                             yield follower.process(_input, time)
                         elif term == self._cur_term:
@@ -366,7 +378,7 @@ class ServerProcess(object):
                                     sent_req_type = self._sent_req_seqs[seq]
                                     del self._sent_req_seqs[seq]
                                 except KeyError:
-                                    print 'recv unknown seq from', src_id, seq
+                                    print self._id, 'recv unknown seq from', src_id, seq
                                     continue
 
                                 if sent_req_type == 'set':
@@ -376,7 +388,7 @@ class ServerProcess(object):
                                         except StopIteration:
                                             self._set_procedure = None
                                     else:
-                                        print 'recv append_result without set'
+                                        print self._id, 'recv append_result without set'
 
                 if self._last_append_time + self._append_timeout < time:
                     self.heartbeat(output)
@@ -424,7 +436,7 @@ class ServerProcess(object):
                             self._next_index[src_id] = to_commit_index + 1
                             self._match_index[src_id] = to_commit_index
                         else:
-                            print 'recv failed append from', src_id, '. retry.'
+                            print self._id, 'recv failed append from', src_id, '. retry.'
                             assert self._next_index[src_id] >= 0
                             self._next_index[src_id] -= 1
                             self.send_append_entries(output, src_id)
@@ -435,7 +447,7 @@ class ServerProcess(object):
                             self.commit_log(to_commit_index)
                             return
                         elif len(reject_count) >= majority_num:  # TODO: remove this?
-                            print 'majority rejected the accept'
+                            print self._id, 'majority rejected the accept'
                             # TODO
                             return
                     else:
@@ -481,7 +493,7 @@ class ServerProcess(object):
         self._member_ids = member_ids
         self._member_ids.remove(self._id)
         self._role = ServerProcess.Follower(
-            self._logs, self._cur_term, None, self._member_ids, {}, -1, -1)
+            self._id, self._logs, self._cur_term, None, self._member_ids, {}, -1, -1)
 
     def get_id(self):
         return self._id
@@ -496,7 +508,8 @@ class ServerProcess(object):
 
 client_commands = {30: [(('set', 1, 2), ('set_result', True), 40)],
                    80: [(('set', 2, 3), ('set_result', True), 40)],
-                   130: [(('get', 2), ('get_result', 3), 40)]}
+                   180: [(('set', 3, 4), ('set_result', True), 40)],
+                   220: [(('get', 2), ('get_result', 3), 40)]}
 processes = [ClientProcess(0, client_commands, range(1, 6))] + \
             [ServerProcess(i, range(1, 6), 3) for i in xrange(1, 6)]
 links = dict(((i, j), 5) for i in xrange(6) for j in xrange(i + 1, 6))
