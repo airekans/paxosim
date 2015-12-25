@@ -464,6 +464,14 @@ class ServerProcess(object):
             majority_num = (1 + len(self._member_ids)) / 2 + 1
             accept_count = set(['self'])
             reject_count = set()
+
+            # this is for case where the cluster contains only 1 server
+            if len(accept_count) >= majority_num:
+                output[client_id] = (seq, ('set_result', True))
+                # the entry has been commited, apply it to the state machine
+                self.commit_log(to_commit_index)
+                return
+
             _input, output = yield
             while True:
                 for src_id, msgs in _input.iteritems():
