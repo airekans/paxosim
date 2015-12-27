@@ -2,6 +2,7 @@
 """
 
 import random
+from raft.config import Configuration
 
 
 class ClientProcess(object):
@@ -100,6 +101,14 @@ class SeqRandomNumber(object):
 class ServerProcess(object):
     MIN_ELECTION_TIMEOUT = 10
 
+    @staticmethod
+    def get_latest_config(logs):
+        for _, entry in reversed(logs):
+            if entry[0] == 'config':
+                return Configuration.from_log(entry)
+
+        return None
+
     class Follower(object):
         def __init__(self, _id, random_num, logs, cur_term, leader, member_ids, kvs,
                      commit_index, last_apply_index):
@@ -114,6 +123,7 @@ class ServerProcess(object):
             self._commit_index = commit_index
             self._last_apply_index = last_apply_index
             self._kvs = kvs
+            self._config = ServerProcess.get_latest_config(logs)
 
         def get_status(self):
             return 'Follower(t=%d,l=%s,last=%d,e=%d,ci=%d,li=%d,logs=%s,kv=%s)' % (
@@ -129,7 +139,9 @@ class ServerProcess(object):
             output = {}
             for src_id, msgs in _input.iteritems():
                 msg = msgs[0]
-                if src_id not in self._member_ids:  # client requests
+
+                if self._config is not None and not self._config.is_server_in_config(src_id):
+                    # client request
                     output[src_id] = (msg[0], ('redirect', self._leader))
                     continue
 
@@ -139,6 +151,7 @@ class ServerProcess(object):
                     if recv_term < self._current_term:
                         output[src_id] = ('reject_vote', self._current_term, self._leader)
                     else:
+                        # TODO: should check whether it's the member in the cluster
                         if recv_term > self._current_term:
                             print self._id, 'recv higher term from', src_id, ', reset leader'
                             self._current_term = recv_term
@@ -175,7 +188,8 @@ class ServerProcess(object):
                 else:
                     print self._id, 'unrecognized msg from', src_id, msg
 
-            if self._last_leader_time + self._election_timeout < time:
+            if self._last_leader_time + self._election_timeout < time and \
+               self._config is not None:
                 self._leader = None
                 candidate = ServerProcess.Candidate(
                     self._id, self._random_num, self._logs, self._current_term + 1,
@@ -233,6 +247,11 @@ class ServerProcess(object):
 
                 self._last_apply_index = last_commit_index
 
+            config = ServerProcess.get_latest_config(self._logs)
+            if self._config is None or not self._config.is_equal(config):
+                print self._id, 'change config to', str(config.to_log())
+                self._config = config
+
             return 'append_result', self._current_term, seq, True
 
     class Candidate(object):
@@ -248,6 +267,8 @@ class ServerProcess(object):
             self._commit_index = commit_index
             self._last_apply_index = last_apply_index
             self._kvs = kvs
+            self._config = ServerProcess.get_latest_config(logs)
+            assert self._config is not None
 
         def get_status(self):
             return 'Candidate(t=%d,e=%d,logs=%s)' % (
@@ -265,15 +286,14 @@ class ServerProcess(object):
             election_start_time = time
             req_msg = ('request_vote', self._cur_term, len(self._logs) - 1,
                         self._logs[-1][0] if len(self._logs) > 0 else -1)
-            reqs = dict((target, req_msg) for target in self._member_ids)
-            accept_count = 1
-            majority_num = (len(self._member_ids) + 1) / 2 + 1
+            reqs = dict((target, req_msg) for target in self._config.get_servers(self._id))
+            accept_members = set([self._id])
             _input, time = yield (self, reqs)
             while True:
                 output = {}
                 for src_id, msgs in _input.iteritems():
                     msg = msgs[0]
-                    if src_id not in self._member_ids:  # client request
+                    if not self._config.is_server_in_config(src_id):  # client request
                         seq = msg[0]
                         output[src_id] = (seq, ('redirect', None))
                         continue
@@ -281,9 +301,8 @@ class ServerProcess(object):
                     msg_type, term = msg[0], msg[1]
                     if term == self._cur_term:
                         if msg_type == 'accept_vote':
-                            # TODO: check duplicate accept
-                            accept_count += 1
-                            if accept_count >= majority_num:
+                            accept_members.add(src_id)
+                            if self._config.is_quorum(accept_members):
                                 leader = ServerProcess.Leader(
                                     self._id, self._random_num, self._logs, self._cur_term,
                                     self._member_ids,
@@ -352,6 +371,8 @@ class ServerProcess(object):
             self._req_seq = 0
             self._next_index = dict((i, len(self._logs)) for i in member_ids)
             self._match_index = dict((i, -1) for i in member_ids)
+            self._config = ServerProcess.get_latest_config(logs)
+            assert self._config is not None
 
         def get_status(self):
             return 'Leader(t=%d,ci=%d,la=%d,logs=%s,st=%s)' % (
@@ -375,7 +396,7 @@ class ServerProcess(object):
                 output = {}
                 for src_id, msgs in _input.iteritems():
                     msg = msgs[0]
-                    if src_id not in self._member_ids:  # request from client
+                    if not self._config.is_server_in_config(src_id):  # request from client
                         seq = msg[0]
                         msg = msg[1]
                         msg_type = msg[0]
@@ -443,7 +464,7 @@ class ServerProcess(object):
             return
 
         def heartbeat(self, output):
-            for target in self._member_ids:
+            for target in self._config.get_servers(self._id):
                 if target not in output:
                     self.send_append_entries(output, target, 'heartbeat')
 
@@ -458,15 +479,14 @@ class ServerProcess(object):
             to_commit_index = len(self._logs)
             self._logs.append((self._cur_term, cmd))
 
-            for target in self._member_ids:
+            for target in self._config.get_servers(self._id):
                 self.send_append_entries(output, target, 'set')
 
-            majority_num = (1 + len(self._member_ids)) / 2 + 1
-            accept_count = set(['self'])
+            accept_count = set([self._id])
             reject_count = set()
 
             # this is for case where the cluster contains only 1 server
-            if len(accept_count) >= majority_num:
+            if self._config.is_quorum(accept_count):
                 output[client_id] = (seq, ('set_result', True))
                 # the entry has been commited, apply it to the state machine
                 self.commit_log(to_commit_index)
@@ -489,12 +509,12 @@ class ServerProcess(object):
                             self._next_index[src_id] -= 1
                             self.send_append_entries(output, src_id, 'set')
 
-                        if len(accept_count) >= majority_num:
+                        if self._config.is_quorum(accept_count):
                             output[client_id] = (seq, ('set_result', True))
                             # the entry has been commited, apply it to the state machine
                             self.commit_log(to_commit_index)
                             return
-                        elif len(reject_count) >= majority_num:  # TODO: remove this?
+                        elif self._config.is_quorum(reject_count):  # TODO: remove this?
                             print self._id, 'majority rejected the accept'
                             # TODO
                             return
@@ -517,10 +537,15 @@ class ServerProcess(object):
             if new_commit_index <= self._commit_index:
                 return
 
-            majority_num = (len(self._member_ids) + 1) / 2 + 1
-            commit_count = 1 if len(self._logs) - 1 == new_commit_index else 0
-            commit_count += list(self._match_index.itervalues()).count(new_commit_index)
-            if commit_count >= majority_num and \
+            commit_count = set()
+            if len(self._logs) - 1 == new_commit_index:
+                commit_count.add(self._id)
+
+            for member_id, commit_index in self._match_index.iteritems():
+                if commit_index == new_commit_index:
+                    commit_count.add(member_id)
+
+            if self._config.is_quorum(commit_count) and \
                self._logs[new_commit_index][0] == self._cur_term:
                 self._commit_index = new_commit_index
 
@@ -529,22 +554,29 @@ class ServerProcess(object):
             if commit_index > self._last_apply_index:
                 for i in xrange(self._last_apply_index + 1, commit_index + 1):
                     term, log_msg = self._logs[i]
-                    assert log_msg[0] == 'set', str(log_msg)
-                    self._kvs[log_msg[1]] = log_msg[2]
+                    if log_msg[0] == 'set':
+                        self._kvs[log_msg[1]] = log_msg[2]
 
                 self._last_apply_index = commit_index
 
-    def __init__(self, _id, member_ids, timeout=0, random_num=None):
+    def __init__(self, _id, member_ids=None, timeout=0, random_num=None):
         self._id = _id
-        self._logs = []
-        self._cur_term = 0
-        self._member_ids = member_ids
-        self._member_ids.remove(self._id)
 
         if random_num is None:
             random_num = NativeRandomNumber(ServerProcess.MIN_ELECTION_TIMEOUT, 30)
+
+        init_term = 0
+        logs = []
+        if member_ids is not None:
+            config = Configuration(Configuration.STATE_STABLE)
+            config.set_servers(member_ids)
+            logs.append((init_term, config.to_log()))
+
+        self._member_ids = list(member_ids)
+        self._member_ids.remove(self._id)
+
         self._role = ServerProcess.Follower(
-            self._id, random_num, self._logs, self._cur_term,
+            self._id, random_num, logs, init_term,
             None, self._member_ids, {}, -1, -1)
 
     def get_id(self):
