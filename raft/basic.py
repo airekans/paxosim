@@ -110,7 +110,7 @@ class ServerProcess(object):
         return None
 
     class Follower(object):
-        def __init__(self, _id, random_num, logs, cur_term, leader, member_ids, kvs,
+        def __init__(self, _id, random_num, logs, cur_term, leader, kvs,
                      commit_index, last_apply_index):
             self._id = _id
             self._random_num = random_num
@@ -119,7 +119,6 @@ class ServerProcess(object):
             self._leader = leader
             self._last_leader_time = 0
             self._election_timeout = random_num.next()
-            self._member_ids = member_ids
             self._commit_index = commit_index
             self._last_apply_index = last_apply_index
             self._kvs = kvs
@@ -193,8 +192,7 @@ class ServerProcess(object):
                 self._leader = None
                 candidate = ServerProcess.Candidate(
                     self._id, self._random_num, self._logs, self._current_term + 1,
-                    self._member_ids, self._kvs,
-                    self._commit_index, self._last_apply_index)
+                    self._kvs, self._commit_index, self._last_apply_index)
                 return candidate.process(_input, time)
 
             return self, output
@@ -255,13 +253,12 @@ class ServerProcess(object):
             return 'append_result', self._current_term, seq, True
 
     class Candidate(object):
-        def __init__(self, _id, random_num, logs, cur_term, member_ids, kvs,
+        def __init__(self, _id, random_num, logs, cur_term, kvs,
                      commit_index, last_apply_index):
             self._id = _id
             self._random_num = random_num
             self._logs = logs
             self._cur_term = cur_term
-            self._member_ids = member_ids
             self._election_timeout = random_num.next()
             self._vote_routine = None
             self._commit_index = commit_index
@@ -305,7 +302,6 @@ class ServerProcess(object):
                             if self._config.is_quorum(accept_members):
                                 leader = ServerProcess.Leader(
                                     self._id, self._random_num, self._logs, self._cur_term,
-                                    self._member_ids,
                                     self._kvs, self._commit_index, self._last_apply_index)
                                 yield leader.process(_input, time)
                         elif msg_type == 'reject_vote':
@@ -319,8 +315,7 @@ class ServerProcess(object):
                             print self._id, 'new leader', src_id, 'append_entries'
                             follower = ServerProcess.Follower(
                                 self._id, self._random_num, self._logs, term, src_id,
-                                self._member_ids, self._kvs, self._commit_index,
-                                self._last_apply_index)
+                                self._kvs, self._commit_index, self._last_apply_index)
                             yield follower.process(_input, time)
                         else:
                             print self._id, 'recv unexpected msg', src_id, msgs
@@ -328,13 +323,11 @@ class ServerProcess(object):
                         if msg_type in ['append_entries', 'request_vote']:
                             follower = ServerProcess.Follower(
                                 self._id, self._random_num, self._logs, term, None,
-                                self._member_ids, self._kvs,
-                                self._commit_index, self._last_apply_index)
+                                self._kvs, self._commit_index, self._last_apply_index)
                         else:
                             follower = ServerProcess.Follower(
                                 self._id, self._random_num, self._logs, term, src_id,
-                                self._member_ids, self._kvs,
-                                self._commit_index, self._last_apply_index)
+                                self._kvs, self._commit_index, self._last_apply_index)
                         yield follower.process(_input, time)
                     else:
                         print self._id, 'recv lower term %d from %d' % (term, src_id)
@@ -344,8 +337,7 @@ class ServerProcess(object):
                 if election_start_time + self._election_timeout < time:
                     new_candidate = ServerProcess.Candidate(
                         self._id, self._random_num, self._logs, self._cur_term + 1,
-                        self._member_ids, self._kvs,
-                        self._commit_index, self._last_apply_index)
+                        self._kvs, self._commit_index, self._last_apply_index)
                     yield new_candidate.process(_input, time)
                 else:
                     _input, time = yield (self, output)
@@ -353,13 +345,12 @@ class ServerProcess(object):
             return
 
     class Leader(object):
-        def __init__(self, _id, random_num, logs, cur_term, member_ids, kvs,
+        def __init__(self, _id, random_num, logs, cur_term, kvs,
                      commit_index, last_apply_index):
             self._id = _id
             self._random_num = random_num
             self._logs = logs
             self._cur_term = cur_term
-            self._member_ids = member_ids
             self._lead_routine = None
             self._append_timeout = ServerProcess.MIN_ELECTION_TIMEOUT - 2
             self._last_append_time = 0
@@ -369,10 +360,12 @@ class ServerProcess(object):
             self._set_procedure = None
             self._sent_req_seqs = {}
             self._req_seq = 0
-            self._next_index = dict((i, len(self._logs)) for i in member_ids)
-            self._match_index = dict((i, -1) for i in member_ids)
             self._config = ServerProcess.get_latest_config(logs)
             assert self._config is not None
+            member_ids = self._config.get_servers()
+
+            self._next_index = dict((i, len(self._logs)) for i in member_ids)
+            self._match_index = dict((i, -1) for i in member_ids)
 
         def get_status(self):
             return 'Leader(t=%d,ci=%d,la=%d,logs=%s,st=%s)' % (
@@ -419,18 +412,15 @@ class ServerProcess(object):
                             if msg_type == 'request_vote':
                                 follower = ServerProcess.Follower(
                                     self._id, self._random_num, self._logs, self._cur_term,
-                                    None, self._member_ids,
-                                    self._kvs, self._commit_index, self._last_apply_index)
+                                    None, self._kvs, self._commit_index, self._last_apply_index)
                             elif msg_type == 'append_entries':
                                 follower = ServerProcess.Follower(
                                     self._id, self._random_num, self._logs, term, src_id,
-                                    self._member_ids, self._kvs,
-                                    self._commit_index, self._last_apply_index)
+                                    self._kvs, self._commit_index, self._last_apply_index)
                             else:
                                 follower = ServerProcess.Follower(
                                     self._id, self._random_num, self._logs, term, None,
-                                    self._member_ids, self._kvs,
-                                    self._commit_index, self._last_apply_index)
+                                    self._kvs, self._commit_index, self._last_apply_index)
                             yield follower.process(_input, time)
                         elif term == self._cur_term:
                             if msg_type == 'append_result':
@@ -576,8 +566,7 @@ class ServerProcess(object):
         self._member_ids.remove(self._id)
 
         self._role = ServerProcess.Follower(
-            self._id, random_num, logs, init_term,
-            None, self._member_ids, {}, -1, -1)
+            self._id, random_num, logs, init_term, None, {}, -1, -1)
 
     def get_id(self):
         return self._id
